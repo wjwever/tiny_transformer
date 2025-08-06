@@ -6,41 +6,39 @@ from transformers import BertTokenizer
 import torch.nn.functional as F
 
 @dataclass
-class ModelArgs:
-    n_embd: int # 嵌入维度
-    n_heads: int # 头数
-    dim: int # 模型维度
-    dropout: float
-    max_seq_len: int
-    vocab_size: int
-    block_size: int
-    n_layer: int
-
-    
+class TransformerConfig:
+    n_embd: int = 256                # 嵌入维度
+    n_heads: int = 4                # 头数
+    n_hidden_dim: int  =  256
+    dropout: float = 0.1
+    #max_seq_len: int = 512
+    vocab_size: int = 1000
+    block_size: int = 1000
+    n_layer: int = 2
 
 class MultiHeadAttention(nn.Module):
 
-    def __init__(self, args: ModelArgs, is_causal=False):
+    def __init__(self, args: TransformerConfig, is_causal=False):
         # 构造函数
         # args: 配置对象
         super().__init__()
         # 隐藏层维度必须是头数的整数倍，因为后面我们会将输入拆成头数个矩阵
-        assert args.dim % args.n_heads == 0
+        assert args.n_embd % args.n_heads == 0
         # 模型并行处理大小，默认为1。
-        model_parallel_size = 1
+        #model_parallel_size = 1
         # 本地计算头数，等于总头数除以模型并行处理大小。
-        self.n_local_heads = args.n_heads // model_parallel_size
+        self.n_local_heads = args.n_heads
         # 每个头的维度，等于模型维度除以头的总数。
-        self.head_dim = args.dim // args.n_heads
+        self.head_dim = args.n_embd // args.n_heads
 
         # Wq, Wk, Wv 参数矩阵，每个参数矩阵为 n_embd x n_embd
         # 这里通过三个组合矩阵来代替了n个参数矩阵的组合，其逻辑在于矩阵内积再拼接其实等同于拼接矩阵再内积，
         # 不理解的读者可以自行模拟一下，每一个线性层其实相当于n个参数矩阵的拼接
-        self.wq = nn.Linear(args.n_embd, self.n_local_heads * self.head_dim, bias=False)
-        self.wk = nn.Linear(args.n_embd, self.n_local_heads * self.head_dim, bias=False)
-        self.wv = nn.Linear(args.n_embd, self.n_local_heads * self.head_dim, bias=False)
+        self.wq = nn.Linear(args.n_embd, args.n_embd, bias=False)
+        self.wk = nn.Linear(args.n_embd, args.n_embd, bias=False)
+        self.wv = nn.Linear(args.n_embd, args.n_embd, bias=False)
         # 输出权重矩阵，维度为 dim x n_embd（head_dim = n_embeds / n_heads）
-        self.wo = nn.Linear(self.n_local_heads * self.head_dim, args.dim, bias=False)
+        self.wo = nn.Linear(args.n_embd, args.n_embd, bias=False)
         # 注意力的 dropout
         self.attn_dropout = nn.Dropout(args.dropout)
         # 残差连接的 dropout
@@ -50,7 +48,7 @@ class MultiHeadAttention(nn.Module):
         # 创建一个上三角矩阵，用于遮蔽未来信息
         # 注意，因为是多头注意力，Mask 矩阵比之前我们定义的多一个维度
         if is_causal:
-            mask = torch.full((1, 1, args.max_seq_len, args.max_seq_len), float("-inf"))
+            mask = torch.full((1, 1, args.block_size, args.block_size), float("-inf"))
             mask = torch.triu(mask, diagonal=1)
             # 注册为模型的缓冲区
             self.register_buffer("mask", mask)
@@ -80,7 +78,7 @@ class MultiHeadAttention(nn.Module):
         # 掩码自注意力必须有注意力掩码
         if self.is_causal:
             assert hasattr(self, 'mask')
-            # 这里截取到序列长度，因为有些序列可能比 max_seq_len 短
+            # 这里截取到序列长度，因为有些序列可能比 block_size 短
             scores = scores + self.mask[:, :, :seqlen, :seqlen]
         # 计算 softmax，维度为 (B, nh, T, T)
         scores = F.softmax(scores.float(), dim=-1).type_as(xq)
@@ -118,14 +116,14 @@ class LayerNorm(nn.Module):
 
 class MLP(nn.Module):
     '''前馈神经网络'''
-    def __init__(self, dim: int, hidden_dim: int, dropout: float):
+    def __init__(self, args):
         super().__init__()
         # 定义第一层线性变换，从输入维度到隐藏维度
-        self.w1 = nn.Linear(dim, hidden_dim, bias=False)
+        self.w1 = nn.Linear(args.n_embd, args.n_hidden_dim, bias=False)
         # 定义第二层线性变换，从隐藏维度到输入维度
-        self.w2 = nn.Linear(hidden_dim, dim, bias=False)
+        self.w2 = nn.Linear(args.n_hidden_dim, args.n_embd, bias=False)
         # 定义dropout层，用于防止过拟合
-        self.dropout = nn.Dropout(dropout)
+        self.dropout = nn.Dropout(args.dropout)
 
     def forward(self, x):
         # 前向传播函数
@@ -142,7 +140,7 @@ class EncoderLayer(nn.Module):
         # Encoder 不需要掩码，传入 is_causal=False
         self.attention = MultiHeadAttention(args, is_causal=False)
         self.fnn_norm = LayerNorm(args.n_embd)
-        self.feed_forward = MLP(args.dim, args.dim, args.dropout)
+        self.feed_forward = MLP(args)
 
     def forward(self, x):
         # Layer Norm
@@ -180,7 +178,7 @@ class DecoderLayer(nn.Module):
         self.attention = MultiHeadAttention(args, is_causal=False)
         self.ffn_norm = LayerNorm(args.n_embd)
         # 第三个部分是 MLP
-        self.feed_forward = MLP(args.dim, args.dim, args.dropout)
+        self.feed_forward = MLP(args)
 
     def forward(self, x, enc_out):
         # Layer Norm
@@ -348,30 +346,30 @@ class Transformer(nn.Module):
         # 再跟 targets 计算交叉熵
         loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
 
-        return loss
+        return logits, loss
 
 
-def main():
-    args = ModelArgs(100, 10, 100, 0.1, 512, 1000, 1000, 2)
-    text = "我喜欢快乐地学习大模型"
-    tokenizer = BertTokenizer.from_pretrained('bert-base-chinese')
-    inputs_token = tokenizer(
-        text,
-        return_tensors='pt',
-        max_length=args.max_seq_len,
-        truncation=True,
-        padding='max_length'
-    )
-    print(inputs_token)
-    args.vocab_size = tokenizer.vocab_size
-    transformer = Transformer(args)
-    inputs_id = inputs_token['input_ids']
-    logits, loss = transformer.forward(inputs_id)
-    print(logits)
-    predicted_ids = torch.argmax(logits, dim=-1).item()
-    output = tokenizer.decode(predicted_ids)
-    print(output)
-
-if __name__ == "__main__":
-    print("开始")
-    main()
+#def main():
+#    args = ModelArgs()
+#    text = "我喜欢快乐地学习大模型"
+#    tokenizer = BertTokenizer.from_pretrained('bert-base-chinese')
+#    inputs_token = tokenizer(
+#        text,
+#        return_tensors='pt',
+#        max_length=args.max_seq_len,
+#        truncation=True,
+#        padding='max_length'
+#    )
+#    print(inputs_token)
+#    args.vocab_size = tokenizer.vocab_size
+#    transformer = Transformer(args)
+#    inputs_id = inputs_token['input_ids']
+#    logits, loss = transformer.forward(inputs_id)
+#    print(logits)
+#    predicted_ids = torch.argmax(logits, dim=-1).item()
+#    output = tokenizer.decode(predicted_ids)
+#    print(output)
+#
+#if __name__ == "__main__":
+#    print("开始")
+#    main()

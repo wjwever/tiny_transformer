@@ -1,12 +1,12 @@
 import tqdm
 import torch
 import torch.optim as optim
-from transformer import Transformer, ModelArgs
+from transformer import Transformer, TransformerConfig
 
 # constants
 
 NUM_BATCHES = int(1e5)
-BATCH_SIZE = 32
+BATCH_SIZE = 64
 LEARNING_RATE = 3e-4
 GENERATE_EVERY  = 100
 NUM_TOKENS = 100
@@ -25,23 +25,21 @@ def cycle():
         src_mask = torch.ones(BATCH_SIZE, src.shape[1]).bool().cuda()
         yield (src, tgt, src_mask)
 
-args = ModelArgs(100, 10, 100, 0.1, 512, 1000, 1000, 2)
+args = TransformerConfig()
 args.vocab_size = NUM_TOKENS
 model = Transformer(args).cuda()
 
 
 # optimizer
-
 optim = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
 # training
-
 for i in tqdm.tqdm(range(NUM_BATCHES), mininterval=10., desc='training'):
     model.train()
 
     src, tgt, src_mask = next(cycle())
 
-    loss = model(src, tgt)
+    _, loss = model(src, targets=tgt)
     loss.backward()
     print(f'loss {i}: {loss.item()}')
 
@@ -49,10 +47,9 @@ for i in tqdm.tqdm(range(NUM_BATCHES), mininterval=10., desc='training'):
     optim.zero_grad()
 
     if i != 0 and i % GENERATE_EVERY == 0:
-        model.eval()
         src, tgt, src_mask = next(cycle())
         src, src_mask, tgt = src[:1], src_mask[:1], tgt[:1]
-        
+
         start_tokens = (torch.zeros((1, 1)) * 1).long().cuda()
         print("start_tokens", start_tokens)
 
