@@ -21,7 +21,7 @@ def cycle():
         suffix = torch.ones((BATCH_SIZE, 1)).long().cuda()
         data = torch.randint(2, NUM_TOKENS, (BATCH_SIZE, ENC_SEQ_LEN)).long().cuda()
         src = torch.cat((prefix, data), 1)
-        tgt = torch.cat((data, suffix), 1)
+        tgt = torch.cat((torch.flip(data, dims=[1]), suffix), 1)
         src_mask = torch.ones(BATCH_SIZE, src.shape[1]).bool().cuda()
         yield (src, tgt, src_mask)
 
