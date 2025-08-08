@@ -2,23 +2,34 @@ import torch
 import math
 from torch import nn
 from dataclasses import dataclass
-from transformers import BertTokenizer
 import torch.nn.functional as F
 
 @dataclass
 class TransformerConfig:
     n_embd: int = 256                # 嵌入维度
-    n_heads: int = 4                # 头数
+    n_heads: int = 2                # 头数
     n_hidden_dim: int  =  256
     dropout: float = 0.1
     #max_seq_len: int = 512
-    vocab_size: int = 1000
-    block_size: int = 1000
+    vocab_size: int = 100
+    block_size: int = 128
     n_layer: int = 2
+
+    #tokenizer
+    sos_idx : int = 1
+    eos_idx : int = 2
+    pad_idx : int = 3
+
+    # data
+    batch_size : int = 64
+    lr : float = 3e-4
+    max_iter : int = 100000
+    gen_every: int = 50
+
 
 class MultiHeadAttention(nn.Module):
 
-    def __init__(self, args: TransformerConfig, is_causal=False):
+    def __init__(self, args: TransformerConfig, is_causal=False, is_encoder = True):
         # 构造函数
         # args: 配置对象
         super().__init__()
@@ -44,6 +55,7 @@ class MultiHeadAttention(nn.Module):
         # 残差连接的 dropout
         self.resid_dropout = nn.Dropout(args.dropout)
         self.is_causal = is_causal
+        self.is_encoder = is_encoder
 
         # 创建一个上三角矩阵，用于遮蔽未来信息
         # 注意，因为是多头注意力，Mask 矩阵比之前我们定义的多一个维度
@@ -53,7 +65,7 @@ class MultiHeadAttention(nn.Module):
             # 注册为模型的缓冲区
             self.register_buffer("mask", mask)
 
-    def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
+    def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, mask: torch.Tensor):
 
         # 获取批次大小和序列长度，[batch_size, seq_len, dim]
         bsz, seqlen, _ = q.shape
@@ -70,21 +82,27 @@ class MultiHeadAttention(nn.Module):
         xv = xv.view(bsz, v.shape[1], self.n_local_heads, self.head_dim)
         xq = xq.transpose(1, 2)
         xk = xk.transpose(1, 2)
-        xv = xv.transpose(1, 2)
+        xv = xv.transpose(1, 2)  # batch, head, tk, head_dim
 
         # 注意力计算
-        # 计算 QK^T / sqrt(d_k)，维度为 (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
+        # 计算 QK^T / sqrt(d_k)，维度为 (B, nh, Tq, hs) x (B, nh, hs, Tk) -> (B, nh, Tq, Tk)
         scores = torch.matmul(xq, xk.transpose(2, 3)) / math.sqrt(self.head_dim)
         # 掩码自注意力必须有注意力掩码
-        if self.is_causal:
-            assert hasattr(self, 'mask')
-            # 这里截取到序列长度，因为有些序列可能比 block_size 短
-            scores = scores + self.mask[:, :, :seqlen, :seqlen]
+        #if self.is_causal:
+        #    assert hasattr(self, 'mask')
+        #    # 这里截取到序列长度，因为有些序列可能比 block_size 短
+        #    scores = scores + self.mask[:, :, :seqlen, :seqlen]
+        # mask (batch, t) -> (batch, 1, 1, t)
+       
+        #print("encoder" if self.is_encoder else "decoder", self.is_causal, scores.shape,  mask.shape)
+        scores = scores + mask
         # 计算 softmax，维度为 (B, nh, T, T)
-        scores = F.softmax(scores.float(), dim=-1).type_as(xq)
+        #scores = F.softmax(scores.float(), dim=-1).type_as(xq)
+        scores = F.softmax(scores.float(), dim=-1)
         # 做 Dropout
         scores = self.attn_dropout(scores)
         # V * Score，维度为(B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+        #print("encoder" if self.is_encoder else "decoder", scores.shape, xv.shape)
         output = torch.matmul(scores, xv)
 
         # 恢复时间维度并合并头。
@@ -142,11 +160,11 @@ class EncoderLayer(nn.Module):
         self.fnn_norm = LayerNorm(args.n_embd)
         self.feed_forward = MLP(args)
 
-    def forward(self, x):
+    def forward(self, x, x_mask):
         # Layer Norm
         x = self.attention_norm(x)
         # 自注意力
-        h = x + self.attention.forward(x, x, x)
+        h = x + self.attention.forward(x, x, x, x_mask)
         # 经过前馈神经网络
         out = h + self.feed_forward.forward(self.fnn_norm(h))
         return out
@@ -159,10 +177,10 @@ class Encoder(nn.Module):
         self.layers = nn.ModuleList([EncoderLayer(args) for _ in range(args.n_layer)])
         self.norm = LayerNorm(args.n_embd)
 
-    def forward(self, x):
+    def forward(self, x, x_mask):
         "分别通过 N 层 Encoder Layer"
         for layer in self.layers:
-            x = layer(x)
+            x = layer(x, x_mask)
         return self.norm(x)
     
 class DecoderLayer(nn.Module):
@@ -172,22 +190,22 @@ class DecoderLayer(nn.Module):
         # 一个 Layer 中有三个 LayerNorm，分别在 Mask Attention 之前、Self Attention 之前和 MLP 之前
         self.attention_norm_1 = LayerNorm(args.n_embd)
         # Decoder 的第一个部分是 Mask Attention，传入 is_causal=True
-        self.mask_attention = MultiHeadAttention(args, is_causal=True)
+        self.mask_attention = MultiHeadAttention(args, is_causal=True, is_encoder=False)
         self.attention_norm_2 = LayerNorm(args.n_embd)
         # Decoder 的第二个部分是 类似于 Encoder 的 Attention，传入 is_causal=False
-        self.attention = MultiHeadAttention(args, is_causal=False)
+        self.attention = MultiHeadAttention(args, is_causal=False, is_encoder = False)
         self.ffn_norm = LayerNorm(args.n_embd)
         # 第三个部分是 MLP
         self.feed_forward = MLP(args)
 
-    def forward(self, x, enc_out):
+    def forward(self, x, x_mask, enc_out, enc_mask):
         # Layer Norm
         x = self.attention_norm_1(x)
         # 掩码自注意力
-        x = x + self.mask_attention.forward(x, x, x)
+        x = x + self.mask_attention.forward(x, x, x, x_mask)
         # 多头注意力
         x = self.attention_norm_2(x)
-        h = x + self.attention.forward(x, enc_out, enc_out)
+        h = x + self.attention.forward(x, enc_out, enc_out, enc_mask)
         # 经过前馈神经网络
         out = h + self.feed_forward.forward(self.ffn_norm(h))
         return out
@@ -200,10 +218,10 @@ class Decoder(nn.Module):
         self.layers = nn.ModuleList([DecoderLayer(args) for _ in range(args.n_layer)])
         self.norm = LayerNorm(args.n_embd)
 
-    def forward(self, x, enc_out):
+    def forward(self, x, x_mask, enc_out, enc_mask):
         "Pass the input (and mask) through each layer in turn."
         for layer in self.layers:
-            x = layer(x, enc_out)
+            x = layer(x, x_mask, enc_out, enc_mask)
         return self.norm(x)
 
 class PositionalEncoding(nn.Module):
@@ -243,8 +261,8 @@ class Transformer(nn.Module):
         assert args.block_size is not None
         self.args = args
         self.transformer = nn.ModuleDict(dict(
-            wte=nn.Embedding(args.vocab_size, args.n_embd),
-            wpe=PositionalEncoding(args),
+            emb=nn.Embedding(args.vocab_size, args.n_embd),
+            pe=PositionalEncoding(args),
             drop=nn.Dropout(args.dropout),
             encoder=Encoder(args),
             decoder=Decoder(args),
@@ -281,95 +299,77 @@ class Transformer(nn.Module):
 
     def generate(self, x, tokens, max_len):
         # 输入为 idx，维度为 (batch size, sequence length, 1)；targets 为目标序列，用于计算 loss
-        device = x.device
-        b, t = x.size()
+        _, t = x.size()
         assert t <= self.args.block_size, f"不能计算该序列，该序列长度为 {t}, 最大序列长度只有 {self.args.block_size}"
+        x_mask = torch.where(x == self.args.pad_idx, torch.tensor(float('-inf')), torch.tensor(0.0))
+        x_mask = x_mask[:, None, None, :].cuda()  # 使用 None 或 np.newaxis
+        y_mask = torch.full((1, 1, self.args.block_size, self.args.block_size), float("-inf"))
+        y_mask = torch.triu(y_mask, diagonal=1).cuda()
 
-        # 通过 self.transformer
-        # 首先将输入 idx 通过 Embedding 层，得到维度为 (batch size, sequence length, n_embd)
-        #print("idx", idx.size())
-        # 通过 Embedding 层
-        tok_emb = self.transformer.wte(x)
+
+        tok_emb = self.transformer.emb(x)
         #print("tok_emb", tok_emb.size())
         # 然后通过位置编码
-        pos_emb = self.transformer.wpe(tok_emb)
+        pos_emb = self.transformer.pe(tok_emb)
         # 再进行 Dropout
         x = self.transformer.drop(pos_emb)
         # 然后通过 Encoder
         #print("x after wpe:", x.size())
-        enc_out = self.transformer.encoder(x)
+        enc_out = self.transformer.encoder(x, x_mask)
         #print("enc_out:", enc_out.size())
 
         # 再通过 Decoder
-        for i in range(max_len):
-            y = self.transformer.wte(tokens)
-            y_pe = self.transformer.wpe(y)
-            y = self.transformer.decoder(y_pe, enc_out)
+        for i in range(10000):
+            b, y_len = tokens.size()
+            yy_mask = y_mask[:, :, :y_len, :y_len]
+
+            y = self.transformer.emb(tokens)
+            y_pe = self.transformer.pe(y)
+
+            y = self.transformer.decoder(y_pe, yy_mask, enc_out, x_mask)
             logits = self.lm_head(y[:, [-1], :])  # note: using list [-1] to preserve the time dim
             predicted_ids = torch.argmax(logits, dim=-1) 
             tokens = torch.cat((tokens, predicted_ids), dim=1)
-        return tokens 
+            if predicted_ids.item() == self.args.eos_idx:
+                print("hit eos break")
+                break
+        return tokens
 
 
 
 
     '''前向计算函数'''
 
-    def forward(self, x, targets):
+    def forward(self, x, y_head, targets):
         # 输入为 idx，维度为 (batch size, sequence length, 1)；targets 为目标序列，用于计算 loss
         device = x.device
-        b, t = x.size()
+        _, t = x.size()
         assert t <= self.args.block_size, f"不能计算该序列，该序列长度为 {t}, 最大序列长度只有 {self.args.block_size}"
 
-        # 通过 self.transformer
-        # 首先将输入 idx 通过 Embedding 层，得到维度为 (batch size, sequence length, n_embd)
-        #print("idx", idx.size())
-        # 通过 Embedding 层
-        tok_emb = self.transformer.wte(x)
-        #print("tok_emb", tok_emb.size())
-        # 然后通过位置编码
-        pos_emb = self.transformer.wpe(tok_emb)
-        # 再进行 Dropout
-        x = self.transformer.drop(pos_emb)
-        # 然后通过 Encoder
-        #print("x after wpe:", x.size())
-        enc_out = self.transformer.encoder(x)
-        #print("enc_out:", enc_out.size())
+        # make x mask
+        x_mask = torch.where(x == self.args.pad_idx, torch.tensor(float('-inf')), torch.tensor(0.0))
+        x_mask = x_mask[:, None, None, :].cuda()  # 使用 None 或 np.newaxis
+        y_mask = torch.full((1, 1, self.args.block_size, self.args.block_size), float("-inf"))
+        y_mask = torch.triu(y_mask, diagonal=1).cuda()
+        _, y_len = y_head.size()
+        y_mask = y_mask[:, :, :y_len, :y_len]
 
-        # 再通过 Decoder
-        x = self.transformer.decoder(x, enc_out)
-        #print("x after decoder:", x.size())
+        x = self.transformer.emb(x)
+        x = self.transformer.pe(x)
+        x = self.transformer.drop(x)
+        enc_out = self.transformer.encoder(x, x_mask)
+
+        y_head = self.transformer.emb(y_head)
+        y_head = self.transformer.pe(y_head)
+        y_head = self.transformer.drop(y_head)
+
+        out = self.transformer.decoder(y_head, y_mask, enc_out, x_mask)
 
         # 训练阶段，如果我们给了 targets，就计算 loss
         # 先通过最后的 Linear 层，得到维度为 (batch size, sequence length, vocab size)
-        logits = self.lm_head(x)
+        logits = self.lm_head(out)
         # 再跟 targets 计算交叉熵
-        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=self.args.pad_idx)
 
         return logits, loss
 
-
-#def main():
-#    args = ModelArgs()
-#    text = "我喜欢快乐地学习大模型"
-#    tokenizer = BertTokenizer.from_pretrained('bert-base-chinese')
-#    inputs_token = tokenizer(
-#        text,
-#        return_tensors='pt',
-#        max_length=args.max_seq_len,
-#        truncation=True,
-#        padding='max_length'
-#    )
-#    print(inputs_token)
-#    args.vocab_size = tokenizer.vocab_size
-#    transformer = Transformer(args)
-#    inputs_id = inputs_token['input_ids']
-#    logits, loss = transformer.forward(inputs_id)
-#    print(logits)
-#    predicted_ids = torch.argmax(logits, dim=-1).item()
-#    output = tokenizer.decode(predicted_ids)
-#    print(output)
-#
-#if __name__ == "__main__":
-#    print("开始")
-#    main()
