@@ -3,7 +3,7 @@ import struct
 from sentencepiece import SentencePieceProcessor
 from typing import List
 
-TOKENIZER_MODEL = "./data/tok4096.model"
+TOKENIZER_MODEL = "./data/tok5000.model"
 
 class Tokenizer:
     def __init__(self, tokenizer_model=None):
@@ -27,7 +27,6 @@ class Tokenizer:
         self.bos_id: int = self.sp_model.bos_id()       # 句子开头 (BOS) 的ID
         self.eos_id: int = self.sp_model.eos_id()       # 句子结尾 (EOS) 的ID
         self.pad_id: int = self.sp_model.pad_id()       # 填充 (PAD) 的ID
-        print(self.pad_id)
 
         self.max_len: int = 256
 
@@ -73,14 +72,14 @@ class Tokenizer:
 
 
 if __name__ == "__main__":
-    enc = Tokenizer('./data/tok8092.model') # 加载分词器
+    enc = Tokenizer('./data/tok5000.model') # 加载分词器
     text = 'Hello, world!' # 测试文本
-    print(enc.encode(text, bos=True, eos=True)) # 编码文本
-    print(enc.decode(enc.encode(text, bos=True, eos=True))) # 解码文本
+    print(enc.encode(text, bos=False, eos=False)) # 编码文本
+    print(enc.decode(enc.encode(text, bos=False, eos=False))) # 解码文本
 
     text = '天气'
-    print(enc.encode(text, bos=True, eos=True)) # 编码文本
-    print(enc.decode(enc.encode(text, bos=True, eos=True))) # 解码文本
+    print(enc.encode(text, bos=False, eos=False)) # 编码文本
+    print(enc.decode(enc.encode(text, bos=False, eos=False))) # 解码文本
 
     tokens = [1, 3, 3,3, 2]
     print(enc.decode(tokens)) # 解码文本

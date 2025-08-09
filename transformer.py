@@ -7,13 +7,13 @@ import torch.nn.functional as F
 @dataclass
 class TransformerConfig:
     n_embd: int = 256                # 嵌入维度
-    n_heads: int = 2                # 头数
+    n_heads: int = 8                # 头数
     n_hidden_dim: int  =  256
     dropout: float = 0.1
     #max_seq_len: int = 512
-    vocab_size: int = 100
-    block_size: int = 128
-    n_layer: int = 2
+    vocab_size: int = 5000
+    block_size: int = 300
+    n_layer: int = 6
 
     #tokenizer
     sos_idx : int = 1
@@ -21,10 +21,14 @@ class TransformerConfig:
     pad_idx : int = 3
 
     # data
-    batch_size : int = 64
-    lr : float = 3e-4
-    max_iter : int = 100000
-    gen_every: int = 50
+    batch_size : int = 32
+    lr : float = 1e-4
+    max_iter : int = 100000000
+    gen_interval: int = 100
+    save_interval = 100
+    save_dir = "."
+
+    #
 
 
 class MultiHeadAttention(nn.Module):
@@ -319,7 +323,7 @@ class Transformer(nn.Module):
         #print("enc_out:", enc_out.size())
 
         # 再通过 Decoder
-        for i in range(10000):
+        for i in range(max_len):
             b, y_len = tokens.size()
             yy_mask = y_mask[:, :, :y_len, :y_len]
 

@@ -5,77 +5,58 @@ from tqdm import tqdm
 import requests
 import sentencepiece as spm
 import argparse
+from tokenizer import Tokenizer
+import numpy as np
 
 DATA_CACHE_DIR = 'data'
-
-def download_file(url: str, fname: str, chunk_size=1024):
-    """发送HTTP GET请求以流式方式获取文件"""
-    resp = requests.get(url, stream=True)
-    
-    # 获取文件的总大小（以字节为单位），默认为0如果没有提供'content-length'头信息
-    total = int(resp.headers.get("content-length", 0))
-    
-    # 以写二进制模式打开一个文件以保存下载的内容
-    with open(fname, "wb") as file, tqdm(
-        desc=fname,           # 进度条前面的描述信息（通常是文件名）
-        total=total,          # 总的字节数，用于设置进度条的总长度
-        unit="iB",            # 进度条的单位，'iB'代表二进制字节
-        unit_scale=True,      # 启用单位缩放，如KB、MB等
-        unit_divisor=1024,    # 设置单位换算的除数，这里为1024
-    ) as bar:
-        # 逐块读取响应内容并写入文件
-        for data in resp.iter_content(chunk_size=chunk_size):
-            size = file.write(data)  # 写入数据块到文件
-            bar.update(size)         # 更新进度条
-
-def download():
-    """在DATA_CACHE_DIR中创建目录，如果目录不存在则创建"""
-    os.makedirs(DATA_CACHE_DIR, exist_ok=True)
-
-    # 定义TinyStories数据集的下载URL和保存的文件名
-    data_url = "https://www.modelscope.cn/datasets/AI-ModelScope/TinyStories/resolve/master/TinyStories_all_data.tar.gz"
-    data_filename = os.path.join(DATA_CACHE_DIR, "TinyStories_all_data.tar.gz")
-    
-    # 检查数据集是否已经下载，如果没有下载则进行下载
-    if not os.path.exists(data_filename):
-        print(f"Downloading {data_url} to {data_filename}...")
-        download_file(data_url, data_filename)  # 使用之前定义的download_file函数进行下载
-    else:
-        print(f"{data_filename} already exists, skipping download...")
-
-    # 定义解压缩后的数据目录
-    data_dir = os.path.join(DATA_CACHE_DIR, "TinyStories_all_data")
-    
-    # 检查数据目录是否存在，如果不存在则解压缩数据集
-    if not os.path.exists(data_dir):
-        os.makedirs(data_dir, exist_ok=True)  # 创建数据目录
-        print(f"Unpacking {data_filename}...")
-        os.system(f"tar -xzf {data_filename} -C {data_dir}")  # 使用系统命令解压缩.tar.gz文件
-    else:
-        print(f"{data_dir} already exists, skipping unpacking...")
-
-    # 查找解压后的所有JSON文件，排序后获取文件名列表
-    shard_filenames = sorted(glob.glob(os.path.join(data_dir, "*.json")))
-    
-    # 打开第一个JSON文件并读取内容
-    with open(shard_filenames[0], "r") as f:
-        data = json.load(f)  # 将JSON文件内容加载到变量data中
-    
-    print("Download done.")  # 下载完成信息
-    print(f"Number of shards: {len(shard_filenames)}")  # 打印解压后数据分片的数量
-    print(f"Example story:\n{data[0]}")  # 打印第一个分片中的一个示例故事
-
-def load_text_from_files(path):
-    path_list = glob.glob(path)
+# 定义分片处理函数
+#
+def load_text_from_file(file_path):
     text_data = []
-    for file_path in path_list:
-        with open(file_path, 'r', encoding='utf-8') as file:
-            text_data.extend(file.readlines())
+    with open(file_path, 'r', encoding='utf-8') as file:
+        text_data.extend(file.readlines())
     return text_data
 
-def batch_iterator(text_data, batch_size=648):
-    for i in range(0, len(text_data), batch_size):
-        yield text_data[i:i + batch_size]
+def process_token(args):
+    """
+    处理数据分片，将其中的文本进行分词并保存为二进制文件。
+    
+    参数:
+    args: tuple, 包含分片ID和分片文件名
+    vocab_size: int, 词汇表大小，用于决定输出文件存储路径
+    """
+    # 初始化分词器
+    TOKENIZER_MODEL = f"data/tok{args.vocab_size}.model"
+    enc = Tokenizer(TOKENIZER_MODEL)
+    
+    # 打开并读取当前分片的文件
+    feats = load_text_from_file(args.feat_txt)
+    labels = load_text_from_file(args.label_text)
+    
+    # 用于保存所有的分词后的token
+    all_feat_tokens = []
+    all_label_tokens = []
+    
+    # 遍历每一个例子，tqdm显示进度条
+    for feat, label in tqdm(zip(feats, labels)):
+        # 提取故事文本，并去除首尾空白字符
+        feat = feat.strip()
+        label = label.strip()
+        
+        feat_tokens = enc.encode(feat, bos=False, eos=False)
+        label_tokens = enc.encode(label, bos=False, eos=False)
+        # 将当前文本的token添加到总token列表
+        #all_tokens.extend(tokens)
+        if len(feat_tokens) < 256 and len(label_tokens) < 256:
+            all_feat_tokens.append(np.array(feat_tokens, dtype=np.int16))
+            all_label_tokens.append(np.array(label_tokens, dtype=np.int16))
+
+    
+    # 将token以二进制形式保存
+    np.savez(f'feats.npz', *all_feat_tokens)
+    np.savez(f'labels.npz', *all_label_tokens)
+    print(f"feats: {len(all_feat_tokens)}, labels: {len(all_label_tokens)}")
+
 
 def train_vocab(args, num_shards: int=20):
     """
@@ -112,8 +93,8 @@ def train_vocab(args, num_shards: int=20):
     #print(f"Size is: {os.path.getsize(tiny_file) / 1024 / 1024:.2f} MB")
 
     # 2) 使用 SentencePiece 训练分词器
-    inputs = [data_dir + '/tiny.en', data_dir + '/tiny.zh']
-    print("Will now train the vocab...", inputs)
+    inputs = [args.feat_txt, args.label_text]
+    print("Will now train the vocab...")
     spm.SentencePieceTrainer.train(
         input=inputs,         # 输入文件为之前生成的 tiny.txt
         model_prefix=prefix,     # 模型前缀路径
@@ -139,10 +120,11 @@ def train_vocab(args, num_shards: int=20):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     #parser.add_argument("--download", type=bool, default=True, help="download the dataset")
-    parser.add_argument("--vocab_size", type=int, default=8192, help="vocab size")
-    parser.add_argument("--corpus_dir", type=str, default="/home/ww/work/data/trans/", help="corpus dir")
+    parser.add_argument("--vocab_size", type=int, default=5000, help="vocab size")
+    parser.add_argument("--corpus_dir", type=str, default="/home/ww/work/data/trans_ted/", help="corpus dir")
+    parser.add_argument("--feat_txt", type=str, default="/home/ww/work/data/trans_ted/TED2013.en-zh.en", help="")
+    parser.add_argument("--label_text", type=str, default="/home/ww/work/data/trans_ted/TED2013.en-zh.zh", help="")
     args = parser.parse_args()
-    #if args.download:
-    #    download()
-    train_vocab(args)
+    #train_vocab(args)
+    process_token(args) 
 
