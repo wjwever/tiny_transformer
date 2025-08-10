@@ -6,12 +6,12 @@ import torch.nn.functional as F
 
 @dataclass
 class TransformerConfig:
-    n_embd: int = 256                # 嵌入维度
-    n_heads: int = 8                # 头数
+    n_embd: int = 256              # 嵌入维度
+    n_heads: int =  8              # 头数
     n_hidden_dim: int  =  256
     dropout: float = 0.1
     #max_seq_len: int = 512
-    vocab_size: int = 5000
+    vocab_size: int = 4096
     block_size: int = 300
     n_layer: int = 6
 
@@ -25,7 +25,7 @@ class TransformerConfig:
     lr : float = 1e-4
     max_iter : int = 100000000
     gen_interval: int = 100
-    save_interval = 100
+    save_interval = 1000
     save_dir = "."
 
     #

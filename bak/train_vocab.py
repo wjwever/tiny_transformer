@@ -65,7 +65,6 @@ def train_vocab(args, num_shards: int=20):
     """
     # 确保词汇表大小为正数
     vocab_size = args.vocab_size
-    data_dir = args.corpus_dir
     assert vocab_size > 0, "Vocab size must be positive"
 
     # SentencePiece 模型的前缀路径，将用于保存分词器
@@ -120,11 +119,10 @@ def train_vocab(args, num_shards: int=20):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     #parser.add_argument("--download", type=bool, default=True, help="download the dataset")
-    parser.add_argument("--vocab_size", type=int, default=5000, help="vocab size")
-    parser.add_argument("--corpus_dir", type=str, default="/home/ww/work/data/trans_ted/", help="corpus dir")
-    parser.add_argument("--feat_txt", type=str, default="/home/ww/work/data/trans_ted/TED2013.en-zh.en", help="")
-    parser.add_argument("--label_text", type=str, default="/home/ww/work/data/trans_ted/TED2013.en-zh.zh", help="")
+    parser.add_argument("--vocab_size", type=int, default=4096, help="vocab size")
+    parser.add_argument("--feat_txt", type=str, default="/home/ww/work/data/cmn/eng.txt", help="")
+    parser.add_argument("--label_text", type=str, default="/home/ww/work/data/cmn/zh.txt", help="")
     args = parser.parse_args()
-    #train_vocab(args)
+    train_vocab(args)
     process_token(args) 
 
