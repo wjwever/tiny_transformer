@@ -1,4 +1,4 @@
-# tiny_transformer
+# tiny_translator
 一个简单的例子使用transformer模型进行英译中任务
 # 训练
 ```
